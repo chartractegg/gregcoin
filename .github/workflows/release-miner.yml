@@ -8,7 +8,7 @@ on:
 jobs:
   build-windows:
     name: Build Windows Miner (.exe)
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -19,12 +19,20 @@ jobs:
         with:
           go-version: '1.22'
 
+      - name: Install mingw cross-compiler
+        run: sudo apt-get install -y mingw-w64
+
       - name: Install Fyne dependencies
         run: go mod tidy
         working-directory: tools/grc-miner-gui/go-fyne
 
       - name: Build Windows exe
         working-directory: tools/grc-miner-gui/go-fyne
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+          CC: x86_64-w64-mingw32-gcc
         run: go build -ldflags="-H windowsgui" -o Gregminer.exe .
 
       - name: Upload to GitHub Release
