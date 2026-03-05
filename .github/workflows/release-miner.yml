@@ -14,61 +14,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          node-version: '20'
+          go-version: '1.22'
 
-      - name: Install dependencies
-        working-directory: tools/grc-miner-gui/electron
-        run: npm install
+      - name: Install Fyne dependencies
+        run: go mod tidy
+        working-directory: tools/grc-miner-gui/go-fyne
 
-      - name: Build Windows installer
-        working-directory: tools/grc-miner-gui/electron
-        run: npx electron-builder --win nsis
-
-      - name: Rename artifact
-        working-directory: tools/grc-miner-gui/electron/dist
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem -Filter "*.exe" | Select-Object -First 1
-          Rename-Item $exe.Name "Gregminer-windows-setup.exe"
+      - name: Build Windows exe
+        working-directory: tools/grc-miner-gui/go-fyne
+        run: go build -ldflags="-H windowsgui" -o Gregminer.exe .
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: tools/grc-miner-gui/electron/dist/Gregminer-windows-setup.exe
-          generate_release_notes: true
-
-  build-mac:
-    name: Build macOS Miner (.dmg)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        working-directory: tools/grc-miner-gui/electron
-        run: npm install
-
-      - name: Build macOS dmg
-        working-directory: tools/grc-miner-gui/electron
-        run: npx electron-builder --mac dmg
-
-      - name: Rename artifact
-        working-directory: tools/grc-miner-gui/electron/dist
-        run: |
-          DMG=$(find . -name "*.dmg" | head -1)
-          mv "$DMG" Gregminer-mac.dmg
-
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: tools/grc-miner-gui/electron/dist/Gregminer-mac.dmg
+          files: tools/grc-miner-gui/go-fyne/Gregminer.exe
           generate_release_notes: true

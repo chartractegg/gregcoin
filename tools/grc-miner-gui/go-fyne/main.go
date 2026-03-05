@@ -1,14 +1,10 @@
-// Gregcoin (GRC) GUI Miner — Go + Fyne
+// Gregcoin (GRC) GUI — Miner + Wallet — Go + Fyne
 //
-// Build:
-//   go mod tidy
-//   go build -o grc-miner .
+// Build (Windows, from Linux with mingw):
+//   GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build -ldflags="-H windowsgui" -o Gregminer.exe .
 //
-// Cross-compile for Windows (from Linux/Mac with mingw-w64):
-//   GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build -o grc-miner.exe .
-//
-// Cross-compile for macOS (on macOS):
-//   go build -o grc-miner-macos .
+// Build (native):
+//   go build -o gregminer .
 package main
 
 import (
@@ -28,8 +24,8 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -98,7 +94,6 @@ func bitsToTarget(bitsHex string) *big.Int {
 // ── Coinbase transaction ──────────────────────────────────────────────────────
 
 func buildCoinbase(height, coinbaseValue int64, scriptPubKey []byte, extraNonce uint32) []byte {
-	// Height as minimal LE bytes (BIP34)
 	var hBytes []byte
 	v := height
 	for v > 0 {
@@ -113,29 +108,21 @@ func buildCoinbase(height, coinbaseValue int64, scriptPubKey []byte, extraNonce 
 	scriptSig  = append(scriptSig, enBytes...)
 
 	var tx []byte
-	// version
 	ver := make([]byte, 4)
 	binary.LittleEndian.PutUint32(ver, 1)
 	tx = append(tx, ver...)
-	// vin count
 	tx = append(tx, varint(1)...)
-	// prevout (null)
 	tx = append(tx, make([]byte, 32)...)
-	tx = append(tx, 0xff, 0xff, 0xff, 0xff) // index
-	// scriptSig
+	tx = append(tx, 0xff, 0xff, 0xff, 0xff)
 	tx = append(tx, varint(uint64(len(scriptSig)))...)
 	tx = append(tx, scriptSig...)
-	tx = append(tx, 0xff, 0xff, 0xff, 0xff) // sequence
-	// vout count
+	tx = append(tx, 0xff, 0xff, 0xff, 0xff)
 	tx = append(tx, varint(1)...)
-	// value
 	val := make([]byte, 8)
 	binary.LittleEndian.PutUint64(val, uint64(coinbaseValue))
 	tx = append(tx, val...)
-	// scriptPubKey
 	tx = append(tx, varint(uint64(len(scriptPubKey)))...)
 	tx = append(tx, scriptPubKey...)
-	// locktime
 	tx = append(tx, make([]byte, 4)...)
 	return tx
 }
@@ -151,7 +138,6 @@ func p2pkhScript(address string) []byte {
 		n.Add(n, big.NewInt(int64(strings.IndexRune(b58Chars, c))))
 	}
 	raw := n.Bytes()
-	// pad to 25 bytes
 	if len(raw) < 25 {
 		pad := make([]byte, 25-len(raw))
 		raw = append(pad, raw...)
@@ -162,8 +148,6 @@ func p2pkhScript(address string) []byte {
 	script  = append(script, 0x88, 0xac)
 	return script
 }
-
-// ── reverse bytes ─────────────────────────────────────────────────────────────
 
 func rev(b []byte) []byte {
 	r := make([]byte, len(b))
@@ -213,7 +197,7 @@ func (r *rpcClient) Call(method string, params ...interface{}) (json.RawMessage,
 		return nil, err
 	}
 	if result.Error != nil {
-		return nil, fmt.Errorf("rpc error: %v", result.Error)
+		return nil, fmt.Errorf("rpc: %v", result.Error)
 	}
 	return result.Result, nil
 }
@@ -221,13 +205,13 @@ func (r *rpcClient) Call(method string, params ...interface{}) (json.RawMessage,
 // ── Miner ─────────────────────────────────────────────────────────────────────
 
 type Miner struct {
-	rpc        *rpcClient
-	address    string
-	running    atomic.Bool
-	hashCount  atomic.Int64
+	rpc         *rpcClient
+	address     string
+	running     atomic.Bool
+	hashCount   atomic.Int64
 	blocksFound atomic.Int64
-	onBlock    func(hash string)
-	onError    func(err string)
+	onBlock     func(hash string)
+	onError     func(err string)
 }
 
 func (m *Miner) Start() {
@@ -237,20 +221,12 @@ func (m *Miner) Start() {
 	go m.loop()
 }
 
-func (m *Miner) Stop() {
-	m.running.Store(false)
-}
-
-func (m *Miner) HashRate() float64 {
-	return 0 // polled externally
-}
+func (m *Miner) Stop() { m.running.Store(false) }
 
 func (m *Miner) loop() {
 	var extraNonce uint32
 	for m.running.Load() {
 		extraNonce++
-		// Get block template
-		var tplRaw json.RawMessage
 		tplRaw, err := m.rpc.Call("getblocktemplate", map[string]interface{}{"rules": []string{"segwit"}})
 		if err != nil {
 			m.onError(err.Error())
@@ -258,9 +234,9 @@ func (m *Miner) loop() {
 			continue
 		}
 		var tpl struct {
-			Version          int    `json:"version"`
+			Version           int    `json:"version"`
 			PreviousBlockHash string `json:"previousblockhash"`
-			Transactions     []struct {
+			Transactions      []struct {
 				Data string `json:"data"`
 				TxID string `json:"txid"`
 			} `json:"transactions"`
@@ -268,7 +244,6 @@ func (m *Miner) loop() {
 			Bits          string `json:"bits"`
 			Height        int64  `json:"height"`
 			CurTime       uint32 `json:"curtime"`
-			Target        string `json:"target"`
 		}
 		if err := json.Unmarshal(tplRaw, &tpl); err != nil {
 			m.onError("parse template: " + err.Error())
@@ -280,20 +255,20 @@ func (m *Miner) loop() {
 		cbTx  := buildCoinbase(tpl.Height, tpl.CoinbaseValue, spk, extraNonce)
 		cbTxid := sha256d(cbTx)
 
-		txids  := [][]byte{cbTxid}
+		txids   := [][]byte{cbTxid}
 		txDatas := [][]byte{cbTx}
 		for _, tx := range tpl.Transactions {
 			raw, _ := hex.DecodeString(tx.Data)
 			txDatas  = append(txDatas, raw)
-			txid, _ := hex.DecodeString(tx.TxID)
-			txids    = append(txids, rev(txid))
+			txid, _  := hex.DecodeString(tx.TxID)
+			txids     = append(txids, rev(txid))
 		}
 
-		mr     := merkleRoot(txids)
+		mr      := merkleRoot(txids)
 		prevH, _ := hex.DecodeString(tpl.PreviousBlockHash)
-		prevH   = rev(prevH)
+		prevH    = rev(prevH)
 		bitsB, _ := hex.DecodeString(tpl.Bits)
-		bitsLE  := rev(bitsB)
+		bitsLE   := rev(bitsB)
 
 		hdr76 := make([]byte, 76)
 		binary.LittleEndian.PutUint32(hdr76[0:], uint32(tpl.Version))
@@ -306,15 +281,12 @@ func (m *Miner) loop() {
 		hdr    := make([]byte, 80)
 		copy(hdr, hdr76)
 
-		found := false
 		for nonce := uint32(0); m.running.Load(); nonce++ {
 			binary.LittleEndian.PutUint32(hdr[76:], nonce)
 			h := sha256d(hdr)
 			m.hashCount.Add(1)
 
-			hashInt := new(big.Int).SetBytes(rev(h))
-			if hashInt.Cmp(target) < 0 {
-				// Submit block
+			if new(big.Int).SetBytes(rev(h)).Cmp(target) < 0 {
 				noncePart := make([]byte, 4)
 				binary.LittleEndian.PutUint32(noncePart, nonce)
 				var blockBuf []byte
@@ -324,23 +296,18 @@ func (m *Miner) loop() {
 				for _, tx := range txDatas {
 					blockBuf = append(blockBuf, tx...)
 				}
-				blockHex := hex.EncodeToString(blockBuf)
-				_, err := m.rpc.Call("submitblock", blockHex)
+				_, err := m.rpc.Call("submitblock", hex.EncodeToString(blockBuf))
 				if err == nil || errors.Is(err, nil) {
 					m.blocksFound.Add(1)
 					m.onBlock(hex.EncodeToString(rev(sha256d(hdr))))
 				} else {
 					m.onError("submitblock: " + err.Error())
 				}
-				found = true
 				break
 			}
 			if nonce == 0xffffffff {
-				break // Exhausted nonce space, get new template
+				break
 			}
-		}
-		if !found {
-			continue // Loop back for new template
 		}
 	}
 }
@@ -350,76 +317,84 @@ func (m *Miner) loop() {
 func main() {
 	a := app.New()
 	a.Settings().SetTheme(theme.DarkTheme())
-	w := a.NewWindow("Gregcoin Miner")
-	w.Resize(fyne.NewSize(520, 700))
-	w.SetFixedSize(true)
+	w := a.NewWindow("Gregcoin GRC")
+	w.Resize(fyne.NewSize(540, 720))
 
-	// Connection fields
-	hostEntry := widget.NewEntry(); hostEntry.SetText("127.0.0.1")
-	portEntry := widget.NewEntry(); portEntry.SetText("8445")
-	userEntry := widget.NewEntry(); userEntry.SetText("grcuser")
+	// ── Connection fields (shared) ──────────────────────────────────────────
+
+	hostEntry := widget.NewEntry()
+	hostEntry.SetText("127.0.0.1")
+	portEntry := widget.NewEntry()
+	portEntry.SetText("8445")
+	userEntry := widget.NewEntry()
+	userEntry.SetText("grcuser")
 	passEntry := widget.NewPasswordEntry()
-	addrEntry := widget.NewEntry(); addrEntry.SetPlaceHolder("Leave blank to auto-generate")
 
 	connForm := widget.NewForm(
 		widget.NewFormItem("Host",     hostEntry),
 		widget.NewFormItem("RPC Port", portEntry),
 		widget.NewFormItem("User",     userEntry),
 		widget.NewFormItem("Password", passEntry),
-		widget.NewFormItem("Address",  addrEntry),
 	)
 
-	// Stats labels
-	rateLabel    := widget.NewLabelWithStyle("0 H/s",   fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	blocksLabel  := widget.NewLabelWithStyle("0",       fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	balLabel     := widget.NewLabelWithStyle("0.0000",  fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	heightLabel  := widget.NewLabelWithStyle("—",       fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	statusLabel  := widget.NewLabelWithStyle("Stopped", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	var rpc *rpcClient
 
-	statsGrid := container.NewGridWithColumns(2,
-		widget.NewLabel("Hash Rate:"),  rateLabel,
-		widget.NewLabel("Blocks:"),     blocksLabel,
-		widget.NewLabel("Balance:"),    balLabel,
-		widget.NewLabel("Height:"),     heightLabel,
-		widget.NewLabel("Status:"),     statusLabel,
+	getOrCreateRPC := func() *rpcClient {
+		var port int
+		fmt.Sscan(portEntry.Text, &port)
+		return newRPC(hostEntry.Text, port, userEntry.Text, passEntry.Text)
+	}
+
+	ensureWallet := func(r *rpcClient) {
+		wallets, _ := r.Call("listwallets")
+		var wlist []string
+		json.Unmarshal(wallets, &wlist)
+		if len(wlist) == 0 {
+			r.Call("createwallet", "main")
+		}
+	}
+
+	// ── Mine tab ───────────────────────────────────────────────────────────
+
+	addrEntry  := widget.NewEntry()
+	addrEntry.SetPlaceHolder("Leave blank to auto-generate")
+
+	rateLabel   := widget.NewLabelWithStyle("0 H/s", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	blocksLabel := widget.NewLabelWithStyle("0",     fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	heightLabel := widget.NewLabelWithStyle("—",     fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	statusLabel := widget.NewLabelWithStyle("Stopped", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	statsGrid := widget.NewForm(
+		widget.NewFormItem("Hash Rate", rateLabel),
+		widget.NewFormItem("Blocks Found", blocksLabel),
+		widget.NewFormItem("Chain Height", heightLabel),
+		widget.NewFormItem("Status", statusLabel),
 	)
 
-	// Log
-	logText := widget.NewMultiLineEntry()
-	logText.Disable()
-	logText.SetMinRowsVisible(6)
-	logScroll := container.NewVScroll(logText)
-	logScroll.SetMinSize(fyne.NewSize(480, 120))
+	logEntry := widget.NewMultiLineEntry()
+	logEntry.Disable()
+	logScroll := container.NewVScroll(logEntry)
+	logScroll.SetMinSize(fyne.NewSize(500, 140))
 
 	addLog := func(msg string) {
 		ts := time.Now().Format("15:04:05")
-		logText.Enable()
-		logText.SetText(logText.Text + fmt.Sprintf("[%s] %s\n", ts, msg))
-		logText.Disable()
+		logEntry.Enable()
+		logEntry.SetText(logEntry.Text + fmt.Sprintf("[%s] %s\n", ts, msg))
+		logEntry.CursorRow = len(strings.Split(logEntry.Text, "\n"))
+		logEntry.Disable()
 	}
 
-	// Miner instance
 	var miner *Miner
-	var rpc *rpcClient
-
-	// Buttons
 	startBtn := widget.NewButton("▶  Start Mining", nil)
 	stopBtn  := widget.NewButton("◼  Stop", nil)
 	stopBtn.Disable()
 
 	startBtn.OnTapped = func() {
-		var portInt int
-		fmt.Sscan(portEntry.Text, &portInt)
-		rpc = newRPC(hostEntry.Text, portInt, userEntry.Text, passEntry.Text)
+		rpc = getOrCreateRPC()
+		ensureWallet(rpc)
 
-		addr := addrEntry.Text
+		addr := strings.TrimSpace(addrEntry.Text)
 		if addr == "" {
-			wallets, _ := rpc.Call("listwallets")
-			var wlist []string
-			json.Unmarshal(wallets, &wlist)
-			if len(wlist) == 0 {
-				rpc.Call("createwallet", "miner")
-			}
 			raw, err := rpc.Call("getnewaddress")
 			if err != nil {
 				addLog("ERROR: " + err.Error())
@@ -427,7 +402,7 @@ func main() {
 			}
 			json.Unmarshal(raw, &addr)
 			addrEntry.SetText(addr)
-			addLog("Address: " + addr)
+			addLog("Generated address: " + addr)
 		}
 
 		infoRaw, err := rpc.Call("getblockchaininfo")
@@ -443,16 +418,15 @@ func main() {
 			rpc:     rpc,
 			address: addr,
 			onBlock: func(hash string) {
-				addLog(fmt.Sprintf("★ BLOCK FOUND! %s...", hash[:20]))
+				addLog(fmt.Sprintf("★ BLOCK FOUND! %s…", hash[:16]))
 				blocksLabel.SetText(fmt.Sprintf("%d", miner.blocksFound.Load()))
 			},
-			onError: func(e string) { addLog("ERROR: " + e) },
+			onError: func(e string) { addLog("ERR: " + e) },
 		}
 		miner.Start()
-
 		startBtn.Disable()
 		stopBtn.Enable()
-		statusLabel.SetText("⛏ Mining")
+		statusLabel.SetText("⛏  Mining…")
 		addLog("Mining started")
 	}
 
@@ -468,7 +442,7 @@ func main() {
 		addLog("Mining stopped")
 	}
 
-	// Periodic stats refresh
+	// Hash rate + height poller
 	go func() {
 		var lastCount int64
 		for {
@@ -476,48 +450,149 @@ func main() {
 			if miner == nil || rpc == nil {
 				continue
 			}
-			cur := miner.hashCount.Load()
+			cur  := miner.hashCount.Load()
 			rate := float64(cur - lastCount)
 			lastCount = cur
-			var rateStr string
 			switch {
 			case rate >= 1e6:
-				rateStr = fmt.Sprintf("%.2f MH/s", rate/1e6)
+				rateLabel.SetText(fmt.Sprintf("%.2f MH/s", rate/1e6))
 			case rate >= 1e3:
-				rateStr = fmt.Sprintf("%.1f KH/s", rate/1e3)
+				rateLabel.SetText(fmt.Sprintf("%.1f KH/s", rate/1e3))
 			default:
-				rateStr = fmt.Sprintf("%.0f H/s", rate)
+				rateLabel.SetText(fmt.Sprintf("%.0f H/s", rate))
 			}
-			rateLabel.SetText(rateStr)
-
-			balRaw, err := rpc.Call("getbalance")
-			if err == nil {
-				var bal float64
-				json.Unmarshal(balRaw, &bal)
-				balLabel.SetText(fmt.Sprintf("%.4f GRC", bal))
-			}
-			infoRaw, err := rpc.Call("getblockchaininfo")
-			if err == nil {
+			if raw, err := rpc.Call("getblockchaininfo"); err == nil {
 				var info struct{ Blocks int `json:"blocks"` }
-				json.Unmarshal(infoRaw, &info)
+				json.Unmarshal(raw, &info)
 				heightLabel.SetText(fmt.Sprintf("%d", info.Blocks))
 			}
 		}
 	}()
 
-	title := canvas.NewText("⛏  GREGCOIN MINER", theme.PrimaryColor())
-	title.TextStyle = fyne.TextStyle{Bold: true}
-	title.TextSize = 18
-
-	content := container.NewVBox(
-		container.NewCenter(title),
-		widget.NewSeparator(),
-		widget.NewCard("Node Connection", "", connForm),
+	mineTab := container.NewVBox(
+		widget.NewCard("Mining Address", "", widget.NewForm(
+			widget.NewFormItem("Address", addrEntry),
+		)),
 		widget.NewCard("Stats", "", statsGrid),
 		widget.NewCard("Log", "", logScroll),
 		container.NewGridWithColumns(2, startBtn, stopBtn),
 	)
 
-	w.SetContent(container.NewVScroll(content))
+	// ── Wallet tab ─────────────────────────────────────────────────────────
+
+	balLabel   := widget.NewLabelWithStyle("— GRC", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
+	receiveAddr := widget.NewEntry()
+	receiveAddr.Disable()
+
+	sendToEntry  := widget.NewEntry()
+	sendToEntry.SetPlaceHolder("G…  recipient address")
+	sendAmtEntry := widget.NewEntry()
+	sendAmtEntry.SetPlaceHolder("0.0000")
+
+	txList := widget.NewMultiLineEntry()
+	txList.Disable()
+	txScroll := container.NewVScroll(txList)
+	txScroll.SetMinSize(fyne.NewSize(500, 160))
+
+	refreshWallet := func() {
+		if rpc == nil {
+			rpc = getOrCreateRPC()
+			ensureWallet(rpc)
+		}
+		if raw, err := rpc.Call("getbalance"); err == nil {
+			var bal float64
+			json.Unmarshal(raw, &bal)
+			balLabel.SetText(fmt.Sprintf("%.8f GRC", bal))
+		}
+		if raw, err := rpc.Call("getnewaddress"); err == nil {
+			var addr string
+			json.Unmarshal(raw, &addr)
+			receiveAddr.Enable()
+			receiveAddr.SetText(addr)
+			receiveAddr.Disable()
+		}
+		if raw, err := rpc.Call("listtransactions", "*", 20, 0); err == nil {
+			var txs []struct {
+				Category string  `json:"category"`
+				Amount   float64 `json:"amount"`
+				TxID     string  `json:"txid"`
+				Time     int64   `json:"time"`
+			}
+			json.Unmarshal(raw, &txs)
+			var sb strings.Builder
+			for i := len(txs) - 1; i >= 0; i-- {
+				tx := txs[i]
+				t  := time.Unix(tx.Time, 0).Format("2006-01-02 15:04")
+				sb.WriteString(fmt.Sprintf("[%s] %+.8f GRC  %s  %.8s…\n",
+					t, tx.Amount, tx.Category, tx.TxID))
+			}
+			txList.Enable()
+			txList.SetText(sb.String())
+			txList.Disable()
+		}
+	}
+
+	refreshBtn := widget.NewButton("⟳  Refresh", func() { go refreshWallet() })
+
+	copyBtn := widget.NewButton("Copy", func() {
+		w.Clipboard().SetContent(receiveAddr.Text)
+	})
+
+	sendBtn := widget.NewButton("Send GRC", func() {
+		if rpc == nil {
+			rpc = getOrCreateRPC()
+		}
+		to  := strings.TrimSpace(sendToEntry.Text)
+		amt := strings.TrimSpace(sendAmtEntry.Text)
+		if to == "" || amt == "" {
+			dialog.ShowError(fmt.Errorf("enter recipient address and amount"), w)
+			return
+		}
+		var amount float64
+		if _, err := fmt.Sscanf(amt, "%f", &amount); err != nil || amount <= 0 {
+			dialog.ShowError(fmt.Errorf("invalid amount"), w)
+			return
+		}
+		raw, err := rpc.Call("sendtoaddress", to, amount)
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		var txid string
+		json.Unmarshal(raw, &txid)
+		dialog.ShowInformation("Sent", fmt.Sprintf("TX: %s", txid), w)
+		sendToEntry.SetText("")
+		sendAmtEntry.SetText("")
+		go refreshWallet()
+	})
+
+	walletTab := container.NewVBox(
+		widget.NewCard("Balance", "", container.NewHBox(balLabel, widget.NewLabel(""), refreshBtn)),
+		widget.NewCard("Receive", "", container.NewVBox(
+			receiveAddr,
+			copyBtn,
+		)),
+		widget.NewCard("Send", "", widget.NewForm(
+			widget.NewFormItem("To", sendToEntry),
+			widget.NewFormItem("Amount", sendAmtEntry),
+			widget.NewFormItem("", sendBtn),
+		)),
+		widget.NewCard("Recent Transactions", "", txScroll),
+	)
+
+	// ── Assemble ───────────────────────────────────────────────────────────
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("⛏  Mine",   container.NewVScroll(mineTab)),
+		container.NewTabItem("💰 Wallet", container.NewVScroll(walletTab)),
+	)
+	tabs.SetTabLocation(container.TabLocationTop)
+
+	w.SetContent(container.NewBorder(
+		widget.NewCard("Node Connection", "", connForm),
+		nil, nil, nil,
+		tabs,
+	))
+
 	w.ShowAndRun()
 }
