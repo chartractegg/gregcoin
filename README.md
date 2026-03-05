@@ -1,79 +1,115 @@
-Bitcoin Core integration/staging tree
-=====================================
+# Gregcoin (GRC)
 
-https://bitcoincore.org
+A peer-to-peer electronic cash system forked from Bitcoin Core.
 
-For an immediately usable, binary version of the Bitcoin Core software, see
-https://bitcoincore.org/en/download/.
+## Parameters
 
-What is Bitcoin Core?
----------------------
+| Parameter | Value |
+|-----------|-------|
+| Ticker | GRC |
+| Total supply | 42,000,000 GRC |
+| Block reward | 100 GRC (halving every 210,000 blocks) |
+| Block time | 2.5 minutes (150 seconds) |
+| Address prefix | G (version byte 38) |
+| Mainnet port | 8444 |
+| RPC port | 8445 |
+| Network magic | `0xd7 0xc6 0xb5 0xa4` |
+| Genesis message | *The Times 04/Mar/2026 Trump: Starmer is no Churchill as Navy deploys to Cyprus* |
 
-Bitcoin Core connects to the Bitcoin peer-to-peer network to download and fully
-validate blocks and transactions. It also includes a wallet and graphical user
-interface, which can be optionally built.
+## Building
 
-Further information about Bitcoin Core is available in the [doc folder](/doc).
+### Dependencies (Debian/Ubuntu)
 
-License
--------
+```sh
+sudo apt install build-essential cmake libboost-all-dev libssl-dev libevent-dev \
+  libdb-dev libdb++-dev libminiupnpc-dev libzmq3-dev pkg-config
+```
 
-Bitcoin Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see https://opensource.org/license/MIT.
+### Compile
 
-Development Process
--------------------
+```sh
+cmake -B build
+cmake --build build -j$(nproc)
+```
 
-The `master` branch is regularly built (see `doc/build-*.md` for instructions) and tested, but it is not guaranteed to be
-completely stable. [Tags](https://github.com/bitcoin/bitcoin/tags) are created
-regularly from release branches to indicate new official, stable release versions of Bitcoin Core.
+Binaries will be in `build/src/`:
+- `bitcoind` — full node daemon
+- `bitcoin-cli` — RPC client
+- `bitcoin-qt` — GUI wallet (if Qt is available)
 
-The https://github.com/bitcoin-core/gui repository is used exclusively for the
-development of the GUI. Its master branch is identical in all monotree
-repositories. Release branches and tags do not exist, so please do not fork
-that repository unless it is for development reasons.
+## Running
 
-The contribution workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md)
-and useful hints for developers can be found in [doc/developer-notes.md](doc/developer-notes.md).
+### Mainnet
 
-Testing
--------
+```sh
+./build/src/bitcoind -daemon
+./build/src/bitcoin-cli getblockchaininfo
+```
 
-Testing and code review is the bottleneck for development; we get more pull
-requests than we can review and test on short notice. Please be patient and help out by testing
-other people's pull requests, and remember this is a security-critical project where any mistake might cost people
-lots of money.
+Configuration file: `~/.bitcoin/bitcoin.conf`
 
-### Automated Testing
+```ini
+server=1
+rpcuser=grcuser
+rpcpassword=yourpassword
+rpcport=8445
+port=8444
+```
 
-Developers are strongly encouraged to write [unit tests](src/test/README.md) for new code, and to
-submit new unit tests for old code. Unit tests can be compiled and run
-(assuming they weren't disabled during the generation of the build system) with: `ctest`. Further details on running
-and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
+### Regtest (development)
 
-There are also [regression and integration tests](/test), written
-in Python.
-These tests can be run (if the [test dependencies](/test) are installed) with: `build/test/functional/test_runner.py`
-(assuming `build` is your build directory).
+```sh
+./build/src/bitcoind -regtest -daemon
+./build/src/bitcoin-cli -regtest createwallet mywallet
+./build/src/bitcoin-cli -regtest getnewaddress
+./build/src/bitcoin-cli -regtest generatetoaddress 10 <address>
+# Each block earns 100 GRC; 10 blocks = 1000 GRC (minus maturity delay)
+```
 
-The CI (Continuous Integration) systems make sure that every pull request is tested on Windows, Linux, and macOS.
-The CI must pass on all commits before merge to avoid unrelated CI failures on new pull requests.
+## Mining
 
-### Manual Quality Assurance (QA) Testing
+See [`tools/grc-miner-gui/`](tools/grc-miner-gui/) for GUI miners available for:
+- macOS
+- Windows
+- Linux
 
-Changes should be tested by somebody other than the developer who wrote the
-code. This is especially important for large or high-risk changes. It is useful
-to add a test plan to the pull request description if testing the changes is
-not straightforward.
+Three implementations are provided: Python/tkinter, Electron, and Go+Fyne.
 
-Translations
-------------
+### Genesis block
 
-Changes to translations as well as new translations can be submitted to
-[Bitcoin Core's Transifex page](https://explore.transifex.com/bitcoin/bitcoin/).
+The genesis block must be mined once before the mainnet can be launched.
 
-Translations are periodically pulled from Transifex and merged into the git repository. See the
-[translation process](doc/translation_process.md) for details on how this works.
+```sh
+cd tools/genesis_miner
+python3 mine_genesis.py
+```
 
-**Important**: We do not accept translation changes as GitHub pull requests because the next
-pull from Transifex would automatically overwrite them again.
+To parallelise across the Pi cluster:
+
+```sh
+bash mine_genesis_parallel.sh
+```
+
+## Network
+
+No DNS seeds or fixed seeds are configured. Nodes must be added manually:
+
+```sh
+./build/src/bitcoin-cli addnode "10.0.1.220:8444" "add"
+./build/src/bitcoin-cli addnode "10.0.1.222:8444" "add"
+./build/src/bitcoin-cli addnode "10.0.1.219:8444" "add"
+./build/src/bitcoin-cli addnode "10.0.1.224:8444" "add"
+```
+
+## Pi Cluster Nodes
+
+| Hostname | IP | Role |
+|----------|----|------|
+| picard | 10.0.1.220 | seed node |
+| data | 10.0.1.222 | miner |
+| troi | 10.0.1.219 | miner |
+| worf | 10.0.1.224 | miner |
+
+## License
+
+Released under the MIT license. See [COPYING](COPYING).
