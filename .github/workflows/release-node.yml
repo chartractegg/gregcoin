@@ -1,0 +1,72 @@
+name: Release Node
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows-node:
+    name: Build Windows Node (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set VCPKG_ROOT
+        shell: pwsh
+        run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: release-node-vcpkg-static-${{ hashFiles('vcpkg.json') }}
+          restore-keys: release-node-vcpkg-static-
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -B build --preset vs2022-static `
+            -DBUILD_DAEMON=ON `
+            -DBUILD_CLI=ON `
+            -DBUILD_BITCOIN_BIN=ON `
+            -DBUILD_WALLET_TOOL=ON `
+            -DBUILD_GUI=OFF `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_BENCH=OFF `
+            -DENABLE_WALLET=ON `
+            -DENABLE_IPC=OFF `
+            -DWITH_ZMQ=OFF `
+            -DWITH_USDT=OFF
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Save vcpkg binary cache
+        uses: actions/cache/save@v4
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: release-node-vcpkg-static-${{ hashFiles('vcpkg.json') }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $rel = "build\bin\Release"
+          $out = "gregcoin-windows-x64"
+          New-Item -ItemType Directory $out | Out-Null
+          @("gregcoind.exe", "gregcoin-cli.exe", "gregcoin.exe", "gregcoin-wallet.exe") | ForEach-Object {
+            $src = "$rel\$_"
+            if (Test-Path $src) { Copy-Item $src $out\ }
+          }
+          Compress-Archive -Path $out\* -DestinationPath "$out.zip"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: gregcoin-windows-x64.zip
+          generate_release_notes: true
