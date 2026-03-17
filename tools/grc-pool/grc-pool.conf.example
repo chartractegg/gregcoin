@@ -1,6 +1,6 @@
 {
   "rpc_user": "grcuser",
-  "rpc_pass": "96615093ce049f332cba4a2dbe76598811e2",
+  "rpc_pass": "YOUR_RPC_PASSWORD",
   "rpc_host": "127.0.0.1",
   "rpc_port": 8445,
   "stratum_host": "127.0.0.1",
