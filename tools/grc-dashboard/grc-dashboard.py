@@ -88,6 +88,7 @@ class NodeStats:
     khs: float = 0.0
     accepted: int = 0
     rejected: int = 0
+    uptime: int = 0
     status: str = "OFFLINE"
 
 @dataclass
@@ -233,6 +234,7 @@ def fetch_miner(ip: str) -> NodeStats:
             ns.khs      = float(pairs.get("KHS", pairs.get("KHS_30s", 0)) or 0)
             ns.accepted = int(pairs.get("ACC", 0) or 0)
             ns.rejected = int(pairs.get("REJ", 0) or 0)
+            ns.uptime   = int(pairs.get("UPTIME", 0) or 0)
             ns.status   = "MINING"
         else:
             ns.status = "STOPPED"
@@ -245,6 +247,14 @@ def fetch_miner(ip: str) -> NodeStats:
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 def fmt_khs(khs: float) -> str:
     return f"{khs/1000:.2f} MH/s" if khs >= 1000 else f"{khs:.1f} KH/s"
+
+def fmt_khs_node(ns) -> str:
+    """KHS for a node — shows 'warmup' if running but no blocks found yet."""
+    if ns.khs > 0:
+        return fmt_khs(ns.khs)
+    if ns.uptime > 0:
+        return "warmup…"
+    return "0 KH/s"
 
 def fmt_age(ts: int) -> str:
     if ts == 0:
@@ -493,7 +503,7 @@ def draw_overview(scr, ci: ChainInfo, nodes: list, start: int, h: int, w: int,
         S(scr, row, COL_NAME,   f"{ns.name:<10}")
         S(scr, row, COL_STATUS, f"{ns.status:<8}", sc)
         if ns.status == "MINING":
-            S(scr, row, COL_KHS, f"{fmt_khs(ns.khs):>10}")
+            S(scr, row, COL_KHS, f"{fmt_khs_node(ns):>10}")
             if wide:
                 share = (ns.khs / total_khs) if total_khs > 0 else 0.0
                 S(scr, row, COL_SPCT, f"{share*100:4.0f}%", curses.color_pair(C_LABEL))
@@ -656,8 +666,10 @@ def draw_mining_stats(scr, ci: ChainInfo, nodes: list,
 
     total_khs = sum(n.khs      for n in nodes if n.status == "MINING")
     total_acc = sum(n.accepted  for n in nodes if n.status == "MINING")
-    total_rej = sum(n.rejected  for n in nodes if n.status == "MINING")
-    n_mining  = sum(1           for n in nodes if n.status == "MINING")
+    total_rej   = sum(n.rejected  for n in nodes if n.status == "MINING")
+    n_mining    = sum(1           for n in nodes if n.status == "MINING")
+    n_reporting = sum(1           for n in nodes if n.status == "MINING" and n.khs > 0)
+    n_warmup    = n_mining - n_reporting
 
     net = ci.net_khs or 0.0001
     share_pct  = total_khs / net * 100 if net > 0 else 0.0
@@ -672,11 +684,12 @@ def draw_mining_stats(scr, ci: ChainInfo, nodes: list,
       f"height: #{ci.blocks}")
     row += 1
 
+    warmup_note = f"  ({n_warmup} warming up)" if n_warmup > 0 else ""
     S(scr, row, 2, "Cluster", curses.color_pair(C_LABEL) | curses.A_BOLD)
     S(scr, row, 11,
       f"hashrate: {fmt_khs(total_khs):<12}  share: {share_pct:.1f}%  "
       f"est. {blks_per_hr:.2f} blk/hr  ≈{grc_per_hr:.0f} GRC/hr  "
-      f"nodes: {n_mining}/{len(nodes)}")
+      f"nodes: {n_mining}/{len(nodes)}{warmup_note}")
     row += 1
 
     tot = total_acc + total_rej
@@ -754,7 +767,7 @@ def draw_mining_stats(scr, ci: ChainInfo, nodes: list,
             share = (ns.khs / total_khs * 100) if total_khs > 0 else 0.0
             t2    = ns.accepted + ns.rejected
             ap2   = (100.0 * ns.accepted / t2) if t2 else 100.0
-            S(scr, row, 26, f"{ns.khs:>9.1f}")
+            S(scr, row, 26, f"{fmt_khs_node(ns):>9}")
             S(scr, row, 37, f"{share:>5.1f}%", curses.color_pair(C_LABEL))
             S(scr, row, 45, f"{ns.accepted:>8}")
             S(scr, row, 55, f"{ns.rejected:>6}",

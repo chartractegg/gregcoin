@@ -3,10 +3,12 @@
 # Usage: ./miner-control.sh [deploy|start|stop|restart|status] [--cpu 25|50|75|100]
 
 COINBASE_ADDR="grc1qthh3zwq09k22yqegv7265xgfvzx447y3rwf3a0"
-RPC_USER="grcuser"
-RPC_PASS="96615093ce049f332cba4a2dbe76598811e2"
+GREGCOIN_CONF="${HOME}/.gregcoin/gregcoin.conf"
+RPC_USER=$(grep -m1 '^rpcuser=' "$GREGCOIN_CONF" | cut -d= -f2)
+RPC_PASS=$(grep -m1 '^rpcpassword=' "$GREGCOIN_CONF" | cut -d= -f2)
 RPC_HOST="10.0.1.220"
-RPC_PORT="8445"
+RPC_PORT=$(grep -m1 '^rpcport=' "$GREGCOIN_CONF" | cut -d= -f2)
+RPC_PORT="${RPC_PORT:-8445}"
 GREGMINER_BIN="/home/pi/gregminer/gregminer"
 
 # CPU throttle: percentage of cores to use (25/50/75/100)
