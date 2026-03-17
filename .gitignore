@@ -28,3 +28,14 @@ target/
 
 /ci/scratch/
 tools/grc-pool/grc-pool.conf
+
+# Compiled binaries in tool dirs
+tools/grc-miner-gui/go-fyne/gregminer
+tools/grc-miner-gui/go-fyne/Gregminer.exe
+
+# Backup files
+*.bak
+CLAUDE.md.bak
+
+# Claude internal
+.claude/

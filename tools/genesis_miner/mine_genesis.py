@@ -21,8 +21,8 @@ GENESIS_PUBKEY = bytes.fromhex(
     "649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f"
 )
 GENESIS_REWARD = 100 * 100_000_000   # 100 GRC in satoshis
-N_TIME  = 1741046400                 # 2026-03-04 00:00:00 UTC
-N_BITS  = 0x1e0ffff0
+N_TIME  = 1773273600                 # 2026-03-12 00:00:00 UTC
+N_BITS  = 0x1e00227b                 # difficulty ~0.029
 VERSION = 1
 # ──────────────────────────────────────────────────────────────────────────────
 

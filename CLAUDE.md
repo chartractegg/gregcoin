@@ -47,14 +47,14 @@ Run regtest to verify mining rewards:
 
 ## Genesis Block (Mainnet)
 
-Mined 2026-03-04 in 1.5s using `tools/genesis_miner/mine_genesis.py`.
+Mined 2026-03-12 in 42.4s using `tools/genesis_miner/mine_genesis.py`.
 
 | Field | Value |
 |-------|-------|
-| nNonce | 637316 |
-| nTime | 1741046400 |
-| nBits | 0x1e0ffff0 |
-| Hash | `00000051a1a941989c60b71a70412ec239f4c968d2c8ad5a34a5eb4e7bc68775` |
+| nNonce | 17937210 |
+| nTime | 1773273600 |
+| nBits | 0x1e00227b |
+| Hash | `0000001cfd5f2ca55e9815affb599b45501e492fa232fd3917d6490981f9e00d` |
 | MerkleRoot | `1c36738b95ca56a0cdfde1b809ded354bf8d68a09a118d2fd0e3d0fcf0d6399d` |
 
 ## GUI Miners

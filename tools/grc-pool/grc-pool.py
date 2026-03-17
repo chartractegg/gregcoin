@@ -305,6 +305,16 @@ class JobManager:
     def get_job(self, job_id: str) -> Optional[Job]:
         return self._current_jobs.get(job_id)
 
+    def get_stats(self) -> dict:
+        authorized = [s for s in self._sessions if s.authorized]
+        total_khs = sum(s.hashrate_khs() for s in authorized)
+        return {
+            "miners": [s.to_stats() for s in authorized],
+            "total_miners": len(authorized),
+            "total_hashrate_khs": round(total_khs, 2),
+            "pending_connections": len(self._sessions) - len(authorized),
+        }
+
     async def fetch_gbt(self, longpollid: Optional[str] = None) -> dict:
         params: list = [{"rules": ["segwit"]}]
         if longpollid:
@@ -359,6 +369,10 @@ class StratumSession:
         self._send_queue: asyncio.Queue = asyncio.Queue()
         self.peer = writer.get_extra_info("peername")
         self._current_job: Optional[Job] = None
+        self.connect_time = time.time()
+        self.shares_accepted = 0
+        self.shares_rejected = 0
+        self._share_log: list = []  # list of (timestamp, difficulty)
         log.info(f"New connection from {self.peer} extranonce1={self.extranonce1.hex()}")
 
     def _new_extranonce1(self) -> bytes:
@@ -521,7 +535,44 @@ class StratumSession:
             except Exception as e:
                 log.error(f"submitblock error: {e}")
 
+        # Track share for hashrate estimation
+        diff = self.cfg["share_difficulty"]
+        self._share_log.append((time.time(), diff))
+        # Keep only last 10 minutes
+        cutoff = time.time() - 600
+        self._share_log = [(t, d) for t, d in self._share_log if t >= cutoff]
+        self.shares_accepted += 1
+
         await self.respond(req_id, True)
+
+    def hashrate_khs(self) -> float:
+        """Estimate hashrate from shares in the last 5 minutes."""
+        now = time.time()
+        window = 300
+        recent = [(t, d) for t, d in self._share_log if now - t <= window]
+        if len(recent) < 2:
+            return 0.0
+        elapsed = now - recent[0][0]
+        if elapsed < 1:
+            return 0.0
+        total_hashes = sum(d * (2 ** 32) for _, d in recent)
+        return total_hashes / elapsed / 1000  # KH/s
+
+    def last_share_age(self) -> Optional[float]:
+        if not self._share_log:
+            return None
+        return time.time() - self._share_log[-1][0]
+
+    def to_stats(self) -> dict:
+        return {
+            "address": self.miner_address or "(pending)",
+            "peer": str(self.peer),
+            "connected_for": int(time.time() - self.connect_time),
+            "shares_accepted": self.shares_accepted,
+            "shares_rejected": self.shares_rejected,
+            "hashrate_khs": round(self.hashrate_khs(), 2),
+            "last_share_age": round(self.last_share_age(), 1) if self.last_share_age() is not None else None,
+        }
 
     def _serialize_block(self, header: bytes, coinbase_raw: bytes, job: Job) -> str:
         txs = job.gbt.get("transactions", [])
@@ -599,15 +650,35 @@ async def main(cfg: dict):
         session = StratumSession(reader, writer, manager, cfg)
         await session.run()
 
+    async def stats_connected(reader, writer):
+        try:
+            await asyncio.wait_for(reader.read(1024), timeout=5)
+            data = json.dumps(manager.get_stats()).encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + data
+            )
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
     host = cfg["stratum_host"]
     port = cfg["stratum_port"]
     server = await asyncio.start_server(client_connected, host, port)
+    stats_server = await asyncio.start_server(stats_connected, "127.0.0.1", port + 1)
     log.info(f"Stratum pool listening on {host}:{port}")
+    log.info(f"Stats API on 127.0.0.1:{port + 1}")
     log.info(f"Pool tag: {cfg.get('pool_tag', '/GRCPool/')}")
     log.info(f"Share difficulty: {cfg['share_difficulty']}")
     log.info("Miners connect with: -u <grc1q_address> -p x")
 
-    async with server:
+    async with server, stats_server:
         await server.serve_forever()
 
 if __name__ == "__main__":

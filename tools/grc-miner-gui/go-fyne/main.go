@@ -1,14 +1,18 @@
 // Gregcoin (GRC) GUI — Miner + Wallet — Go + Fyne
 //
-// Build (Windows, from Linux with mingw):
-//   GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build -ldflags="-H windowsgui" -o Gregminer.exe .
+// Build with embedded daemon (Linux ARM64, run from gregcoin repo root):
+//   cp build/bin/gregcoind tools/grc-miner-gui/go-fyne/gregcoind
+//   cd tools/grc-miner-gui/go-fyne
+//   go build -tags embed_daemon -o gregminer .
+//   rm gregcoind   # remove from source tree after build
 //
-// Build (native):
+// Build without daemon (development / daemon on PATH):
 //   go build -o gregminer .
 package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -18,6 +22,10 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -157,6 +165,187 @@ func rev(b []byte) []byte {
 	return r
 }
 
+// ── App config ────────────────────────────────────────────────────────────────
+
+type AppConfig struct {
+	RPCUser        string `json:"rpc_user"`
+	RPCPass        string `json:"rpc_pass"`
+	RPCHost        string `json:"rpc_host"`
+	RPCPort        int    `json:"rpc_port"`
+	MiningAddress  string `json:"mining_address"`
+	ReceiveAddress string `json:"receive_address"`
+}
+
+func appDataDir() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("APPDATA"), "Gregcoin")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".gregcoin")
+}
+
+func configFilePath() string {
+	return filepath.Join(appDataDir(), "app_config.json")
+}
+
+func randomPass() string {
+	b := make([]byte, 18)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func loadOrCreateConfig() AppConfig {
+	data, err := os.ReadFile(configFilePath())
+	if err == nil {
+		var cfg AppConfig
+		if json.Unmarshal(data, &cfg) == nil && cfg.RPCPass != "" {
+			return cfg
+		}
+	}
+	cfg := AppConfig{
+		RPCUser: "grcuser",
+		RPCPass: randomPass(),
+		RPCHost: "127.0.0.1",
+		RPCPort: 8445,
+	}
+	saveConfig(cfg)
+	return cfg
+}
+
+func saveConfig(cfg AppConfig) {
+	os.MkdirAll(appDataDir(), 0700)
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(configFilePath(), data, 0600)
+}
+
+// ── Daemon management ─────────────────────────────────────────────────────────
+
+var daemonCmd *exec.Cmd
+
+// extractEmbeddedDaemon writes the embedded daemon binary to the app data dir
+// (if embeddedDaemon is non-empty) and returns its path. Returns ("", nil) when
+// no binary is embedded so the caller can fall through to normal search.
+func extractEmbeddedDaemon() (string, error) {
+	if len(embeddedDaemon) == 0 {
+		return "", nil
+	}
+	name := "gregcoind"
+	if runtime.GOOS == "windows" {
+		name = "gregcoind.exe"
+	}
+	dest := filepath.Join(appDataDir(), name)
+	// Skip extraction if the file already exists with the same size.
+	if info, err := os.Stat(dest); err == nil && info.Size() == int64(len(embeddedDaemon)) {
+		return dest, nil
+	}
+	if err := os.MkdirAll(appDataDir(), 0700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(dest, embeddedDaemon, 0755); err != nil {
+		return "", fmt.Errorf("extract embedded daemon: %w", err)
+	}
+	return dest, nil
+}
+
+// findDaemonExe looks for gregcoind/bitcoind in several locations.
+func findDaemonExe() (string, error) {
+	// 0. Embedded binary (present when built with -tags embed_daemon).
+	if path, err := extractEmbeddedDaemon(); err == nil && path != "" {
+		return path, nil
+	}
+
+	var names []string
+	if runtime.GOOS == "windows" {
+		names = []string{"gregcoind.exe", "bitcoind.exe"}
+	} else {
+		names = []string{"gregcoind", "bitcoind"}
+	}
+
+	// 1. Next to the running executable (works for deployed builds).
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for _, name := range names {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+
+	// 2. Walk up from cwd looking for build/bin/ or build/src/ (covers `go run .` from source tree).
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 6; i++ {
+			for _, name := range names {
+				for _, subdir := range []string{"build/bin", "build/src"} {
+					p := filepath.Join(dir, subdir, name)
+					if _, err := os.Stat(p); err == nil {
+						return p, nil
+					}
+				}
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	// 3. PATH
+	for _, name := range names {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		return "", fmt.Errorf("gregcoind not found — place gregcoind.exe in the same folder as this program")
+	}
+	return "", fmt.Errorf("gregcoind not found — build it (cmake --build build) or put it in PATH")
+}
+
+func writeDaemonConf(cfg AppConfig) error {
+	dd := appDataDir()
+	if err := os.MkdirAll(dd, 0700); err != nil {
+		return err
+	}
+	conf := fmt.Sprintf(
+		// bind=0.0.0.0 prevents the daemon auto-binding 127.0.0.1:<rpcport> for Tor
+		// (default onion port = P2P port+1 = 8445, which collides with rpcport=8445).
+		"rpcuser=%s\nrpcpassword=%s\nrpcport=%d\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nserver=1\nlisten=1\nbind=0.0.0.0\nlistenonion=0\nmaxconnections=16\n",
+		cfg.RPCUser, cfg.RPCPass, cfg.RPCPort,
+	)
+	// Daemon reads gregcoin.conf (renamed from bitcoin.conf in this fork).
+	// Do NOT write bitcoin.conf — the daemon reads both and duplicate rpcbind breaks startup.
+	return os.WriteFile(filepath.Join(dd, "gregcoin.conf"), []byte(conf), 0600)
+}
+
+// startDaemon starts gregcoind; returns the exe path found or an error.
+func startDaemon(cfg AppConfig) (string, error) {
+	exePath, err := findDaemonExe()
+	if err != nil {
+		return "", err
+	}
+	if err := writeDaemonConf(cfg); err != nil {
+		return exePath, fmt.Errorf("write config: %w", err)
+	}
+	daemonCmd = exec.Command(exePath, "-datadir="+appDataDir())
+	if err := daemonCmd.Start(); err != nil {
+		daemonCmd = nil
+		return exePath, fmt.Errorf("start daemon: %w", err)
+	}
+	return exePath, nil
+}
+
+func stopDaemon() {
+	if daemonCmd != nil && daemonCmd.Process != nil {
+		daemonCmd.Process.Kill()
+		daemonCmd.Wait()
+		daemonCmd = nil
+	}
+}
+
 // ── RPC ───────────────────────────────────────────────────────────────────────
 
 type rpcClient struct {
@@ -177,24 +366,34 @@ func newRPC(host string, port int, user, pass string) *rpcClient {
 func (r *rpcClient) Call(method string, params ...interface{}) (json.RawMessage, error) {
 	r.id++
 	body, _ := json.Marshal(map[string]interface{}{
-		"jsonrpc": "1.1", "id": r.id,
+		"jsonrpc": "1.0", "id": r.id,
 		"method": method, "params": params,
 	})
 	req, _ := http.NewRequest("POST", r.url, bytes.NewReader(body))
 	req.SetBasicAuth(r.user, r.pass)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot reach daemon at %s — is it running? (%w)", r.url, err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 {
+		return nil, fmt.Errorf("RPC authentication failed — check username/password")
+	}
+
 	data, _ := io.ReadAll(resp.Body)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty response from daemon (HTTP %d)", resp.StatusCode)
+	}
+
 	var result struct {
 		Result json.RawMessage `json:"result"`
 		Error  interface{}     `json:"error"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid response from daemon (HTTP %d): %w", resp.StatusCode, err)
 	}
 	if result.Error != nil {
 		return nil, fmt.Errorf("rpc: %v", result.Error)
@@ -315,49 +514,127 @@ func (m *Miner) loop() {
 // ── GUI ───────────────────────────────────────────────────────────────────────
 
 func main() {
+	// Load or create persistent config (RPC credentials stored in AppData/Gregcoin)
+	cfg := loadOrCreateConfig()
+
 	a := app.New()
 	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("Gregcoin GRC")
-	w.Resize(fyne.NewSize(540, 720))
+	w.Resize(fyne.NewSize(540, 760))
 
-	// ── Connection fields (shared) ──────────────────────────────────────────
+	// ── Connection fields ───────────────────────────────────────────────────
 
 	hostEntry := widget.NewEntry()
-	hostEntry.SetText("127.0.0.1")
+	hostEntry.SetText(cfg.RPCHost)
 	portEntry := widget.NewEntry()
-	portEntry.SetText("8445")
+	portEntry.SetText(fmt.Sprintf("%d", cfg.RPCPort))
 	userEntry := widget.NewEntry()
-	userEntry.SetText("grcuser")
+	userEntry.SetText(cfg.RPCUser)
 	passEntry := widget.NewPasswordEntry()
+	passEntry.SetText(cfg.RPCPass)
+
+	nodeStatusLabel := widget.NewLabelWithStyle("● Starting…", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
 
 	connForm := widget.NewForm(
 		widget.NewFormItem("Host",     hostEntry),
 		widget.NewFormItem("RPC Port", portEntry),
 		widget.NewFormItem("User",     userEntry),
 		widget.NewFormItem("Password", passEntry),
+		widget.NewFormItem("Daemon",   nodeStatusLabel),
 	)
 
-	var rpc *rpcClient
+	var rpc       *rpcClient // node-level RPC (no wallet path)
+	var walletRPC *rpcClient // wallet-level RPC (URL includes /wallet/<name>/)
 
 	getOrCreateRPC := func() *rpcClient {
 		var port int
 		fmt.Sscan(portEntry.Text, &port)
-		return newRPC(hostEntry.Text, port, userEntry.Text, passEntry.Text)
+		// Persist any user-edited connection settings
+		cfg.RPCHost = hostEntry.Text
+		cfg.RPCPort = port
+		cfg.RPCUser = userEntry.Text
+		cfg.RPCPass = passEntry.Text
+		saveConfig(cfg)
+		return newRPC(cfg.RPCHost, cfg.RPCPort, cfg.RPCUser, cfg.RPCPass)
 	}
 
 	ensureWallet := func(r *rpcClient) {
 		wallets, _ := r.Call("listwallets")
 		var wlist []string
 		json.Unmarshal(wallets, &wlist)
+		var walletName string
 		if len(wlist) == 0 {
-			r.Call("createwallet", "main")
+			// Try to load an existing wallet file first; create only if it doesn't exist.
+			if _, err := r.Call("loadwallet", "main"); err != nil {
+				r.Call("createwallet", "main")
+			}
+			walletName = "main"
+		} else {
+			// Use the first loaded wallet (prefer "main" if present).
+			walletName = wlist[0]
+			for _, w := range wlist {
+				if w == "main" {
+					walletName = "main"
+					break
+				}
+			}
+		}
+		// Build a wallet-specific RPC client so calls work even when
+		// multiple wallets are loaded simultaneously.
+		walletRPC = &rpcClient{
+			url:  fmt.Sprintf("http://%s:%d/wallet/%s/", cfg.RPCHost, cfg.RPCPort, walletName),
+			user: cfg.RPCUser,
+			pass: cfg.RPCPass,
 		}
 	}
 
+	// ── Auto-start daemon ───────────────────────────────────────────────────
+
+	// Declared here so the daemon goroutine below can reference it; assigned later.
+	var refreshAddresses func()
+
+	// Closed once the daemon is confirmed ready; lets startBtn wait safely.
+	daemonReady := make(chan struct{})
+
+	go func() {
+		exePath, err := startDaemon(cfg)
+		if err != nil {
+			nodeStatusLabel.SetText("● " + err.Error())
+			return
+		}
+		nodeStatusLabel.SetText("● Starting " + filepath.Base(exePath) + "…")
+		// Poll up to 15s for daemon to become ready
+		testRPC := newRPC(cfg.RPCHost, cfg.RPCPort, cfg.RPCUser, cfg.RPCPass)
+		for i := 0; i < 30; i++ {
+			time.Sleep(500 * time.Millisecond)
+			if _, err := testRPC.Call("getblockchaininfo"); err == nil {
+				// Ensure wallet is loaded so the wallet tab works immediately.
+				ensureWallet(testRPC)
+				rpc = testRPC
+				nodeStatusLabel.SetText("● Running (" + filepath.Base(exePath) + ")")
+				close(daemonReady)
+				go refreshAddresses()
+				return
+			}
+		}
+		nodeStatusLabel.SetText("● Running (check connection if errors occur)")
+	}()
+
+	w.SetOnClosed(func() {
+		stopDaemon()
+	})
+
 	// ── Mine tab ───────────────────────────────────────────────────────────
 
-	addrEntry  := widget.NewEntry()
-	addrEntry.SetPlaceHolder("Leave blank to auto-generate")
+	addrEntry := widget.NewEntry()
+	addrEntry.SetPlaceHolder("Auto-generated on first mine")
+	if cfg.MiningAddress != "" {
+		addrEntry.SetText(cfg.MiningAddress)
+	}
+	addrEntry.OnChanged = func(s string) {
+		cfg.MiningAddress = strings.TrimSpace(s)
+		saveConfig(cfg)
+	}
 
 	rateLabel   := widget.NewLabelWithStyle("0 H/s", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
 	blocksLabel := widget.NewLabelWithStyle("0",     fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
@@ -390,18 +667,38 @@ func main() {
 	stopBtn.Disable()
 
 	startBtn.OnTapped = func() {
-		rpc = getOrCreateRPC()
-		ensureWallet(rpc)
+		// Wait for daemon if not yet ready (up to 15s).
+		select {
+		case <-daemonReady:
+			// Already ready — fast path.
+		default:
+			addLog("Waiting for daemon…")
+			select {
+			case <-daemonReady:
+				// Became ready in time.
+			case <-time.After(15 * time.Second):
+				addLog("ERROR: Daemon did not start in time — check the Daemon status above")
+				return
+			}
+		}
+		if rpc == nil {
+			rpc = getOrCreateRPC()
+			ensureWallet(rpc)
+		}
 
 		addr := strings.TrimSpace(addrEntry.Text)
 		if addr == "" {
-			raw, err := rpc.Call("getnewaddress")
+			if walletRPC == nil {
+				addLog("ERROR: wallet not ready")
+				return
+			}
+			raw, err := walletRPC.Call("getnewaddress")
 			if err != nil {
-				addLog("ERROR: " + err.Error())
+				addLog("ERROR getting address: " + err.Error())
 				return
 			}
 			json.Unmarshal(raw, &addr)
-			addrEntry.SetText(addr)
+			addrEntry.SetText(addr) // OnChanged saves to cfg automatically
 			addLog("Generated address: " + addr)
 		}
 
@@ -480,8 +777,9 @@ func main() {
 
 	// ── Wallet tab ─────────────────────────────────────────────────────────
 
-	balLabel   := widget.NewLabelWithStyle("— GRC", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
-	receiveAddr := widget.NewEntry()
+	balLabel      := widget.NewLabelWithStyle("— GRC", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
+	immatureLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	receiveAddr   := widget.NewEntry()
 	receiveAddr.Disable()
 
 	sendToEntry  := widget.NewEntry()
@@ -499,19 +797,36 @@ func main() {
 			rpc = getOrCreateRPC()
 			ensureWallet(rpc)
 		}
-		if raw, err := rpc.Call("getbalance"); err == nil {
-			var bal float64
-			json.Unmarshal(raw, &bal)
-			balLabel.SetText(fmt.Sprintf("%.8f GRC", bal))
+		wr := walletRPC
+		if wr == nil {
+			return
 		}
-		if raw, err := rpc.Call("getnewaddress"); err == nil {
-			var addr string
-			json.Unmarshal(raw, &addr)
-			receiveAddr.Enable()
-			receiveAddr.SetText(addr)
-			receiveAddr.Disable()
+		if raw, err := wr.Call("getbalances"); err == nil {
+			var bals struct {
+				Mine struct {
+					Trusted   float64 `json:"trusted"`
+					Immature  float64 `json:"immature"`
+				} `json:"mine"`
+			}
+			json.Unmarshal(raw, &bals)
+			balLabel.SetText(fmt.Sprintf("%.8f GRC", bals.Mine.Trusted))
+			if bals.Mine.Immature > 0 {
+				immatureLabel.SetText(fmt.Sprintf("+ %.8f GRC immature (maturing)", bals.Mine.Immature))
+			} else {
+				immatureLabel.SetText("")
+			}
 		}
-		if raw, err := rpc.Call("listtransactions", "*", 20, 0); err == nil {
+		// Only fetch a new receive address on true first-ever run.
+		if cfg.ReceiveAddress == "" {
+			if raw, err := wr.Call("getnewaddress"); err == nil {
+				json.Unmarshal(raw, &cfg.ReceiveAddress)
+				saveConfig(cfg)
+			}
+		}
+		receiveAddr.Enable()
+		receiveAddr.SetText(cfg.ReceiveAddress)
+		receiveAddr.Disable()
+		if raw, err := wr.Call("listtransactions", "*", 20, 0); err == nil {
 			var txs []struct {
 				Category string  `json:"category"`
 				Amount   float64 `json:"amount"`
@@ -541,6 +856,12 @@ func main() {
 	sendBtn := widget.NewButton("Send GRC", func() {
 		if rpc == nil {
 			rpc = getOrCreateRPC()
+			ensureWallet(rpc)
+		}
+		wr := walletRPC
+		if wr == nil {
+			dialog.ShowError(fmt.Errorf("wallet not ready — try refreshing first"), w)
+			return
 		}
 		to  := strings.TrimSpace(sendToEntry.Text)
 		amt := strings.TrimSpace(sendAmtEntry.Text)
@@ -553,7 +874,7 @@ func main() {
 			dialog.ShowError(fmt.Errorf("invalid amount"), w)
 			return
 		}
-		raw, err := rpc.Call("sendtoaddress", to, amount)
+		raw, err := wr.Call("sendtoaddress", to, amount)
 		if err != nil {
 			dialog.ShowError(err, w)
 			return
@@ -567,7 +888,10 @@ func main() {
 	})
 
 	walletTab := container.NewVBox(
-		widget.NewCard("Balance", "", container.NewHBox(balLabel, widget.NewLabel(""), refreshBtn)),
+		widget.NewCard("Balance", "", container.NewVBox(
+			container.NewHBox(balLabel, widget.NewLabel(""), refreshBtn),
+			immatureLabel,
+		)),
 		widget.NewCard("Receive", "", container.NewVBox(
 			receiveAddr,
 			copyBtn,
@@ -580,13 +904,104 @@ func main() {
 		widget.NewCard("Recent Transactions", "", txScroll),
 	)
 
+	// ── Addresses tab ──────────────────────────────────────────────────────
+
+	addrList := widget.NewMultiLineEntry()
+	addrList.Disable()
+	addrListScroll := container.NewVScroll(addrList)
+	addrListScroll.SetMinSize(fyne.NewSize(500, 400))
+
+	addrStatusLabel := widget.NewLabel("Press Refresh to load addresses.")
+
+	refreshAddresses = func() {
+		if rpc == nil {
+			rpc = getOrCreateRPC()
+			ensureWallet(rpc)
+		}
+		wr := walletRPC
+		if wr == nil {
+			addrStatusLabel.SetText("Wallet not ready.")
+			return
+		}
+		addrStatusLabel.SetText("Loading…")
+		raw, err := wr.Call("listreceivedbyaddress", 0, true)
+		if err != nil {
+			addrStatusLabel.SetText("Error: " + err.Error())
+			return
+		}
+		var entries []struct {
+			Address       string  `json:"address"`
+			Amount        float64 `json:"amount"`
+			Confirmations int     `json:"confirmations"`
+			TxIDs         []string `json:"txids"`
+			Label         string  `json:"label"`
+		}
+		json.Unmarshal(raw, &entries)
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("%-46s  %18s  %s\n", "Address", "Received (GRC)", "TXs"))
+		sb.WriteString(strings.Repeat("─", 80) + "\n")
+		used := 0
+		for _, e := range entries {
+			marker := " "
+			if len(e.TxIDs) > 0 {
+				marker = "●"
+				used++
+			}
+			sb.WriteString(fmt.Sprintf("%s %-46s  %18.8f  %d\n",
+				marker, e.Address, e.Amount, len(e.TxIDs)))
+		}
+		sb.WriteString(fmt.Sprintf("\n%d addresses total, %d used (● = has transactions)\n", len(entries), used))
+
+		addrList.Enable()
+		addrList.SetText(sb.String())
+		addrList.Disable()
+		addrStatusLabel.SetText(fmt.Sprintf("%d addresses", len(entries)))
+	}
+
+	addrRefreshBtn := widget.NewButton("⟳  Refresh Addresses", func() { go refreshAddresses() })
+
+	newAddrBtn := widget.NewButton("+ New Address", func() {
+		if rpc == nil {
+			rpc = getOrCreateRPC()
+			ensureWallet(rpc)
+		}
+		wr := walletRPC
+		if wr == nil {
+			addrStatusLabel.SetText("Wallet not ready.")
+			return
+		}
+		raw, err := wr.Call("getnewaddress")
+		if err != nil {
+			addrStatusLabel.SetText("Error: " + err.Error())
+			return
+		}
+		var addr string
+		json.Unmarshal(raw, &addr)
+		// Persist the new receive address so the wallet tab also shows it.
+		cfg.ReceiveAddress = addr
+		saveConfig(cfg)
+		go refreshAddresses()
+	})
+
+	addressesTab := container.NewVBox(
+		container.NewHBox(addrRefreshBtn, newAddrBtn, addrStatusLabel),
+		widget.NewCard("All Wallet Addresses", "● = has received transactions", addrListScroll),
+	)
+
 	// ── Assemble ───────────────────────────────────────────────────────────
 
 	tabs := container.NewAppTabs(
-		container.NewTabItem("⛏  Mine",   container.NewVScroll(mineTab)),
-		container.NewTabItem("💰 Wallet", container.NewVScroll(walletTab)),
+		container.NewTabItem("⛏  Mine",      container.NewVScroll(mineTab)),
+		container.NewTabItem("💰 Wallet",    container.NewVScroll(walletTab)),
+		container.NewTabItem("📋 Addresses", container.NewVScroll(addressesTab)),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
+	tabs.OnChanged = func(tab *container.TabItem) {
+		if tab.Text == "📋 Addresses" {
+			go refreshAddresses()
+		}
+	}
 
 	w.SetContent(container.NewBorder(
 		widget.NewCard("Node Connection", "", connForm),

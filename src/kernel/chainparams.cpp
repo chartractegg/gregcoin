@@ -94,7 +94,7 @@ public:
         consensus.SegwitHeight = 481824; // 0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893
         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
         consensus.powLimit = uint256{"00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+        consensus.nPowTargetTimespan = 24 * 60 * 60; // 1 day → 576-block retarget interval
         consensus.nPowTargetSpacing = 150; // 2.5 minutes
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
@@ -131,11 +131,11 @@ public:
         m_assumed_blockchain_size = 810;
         m_assumed_chain_state_size = 14;
 
-        // Gregcoin genesis block — mined 04/Mar/2026
+        // Gregcoin genesis block — mined 12/Mar/2026 (chain reset: fixed genesis timestamp + harder nBits)
         // "The Times 04/Mar/2026 Trump: Starmer is no Churchill as Navy deploys to Cyprus"
-        genesis = CreateGenesisBlock(1741046400, 637316, 0x1e0ffff0, 1, 100 * COIN);
+        genesis = CreateGenesisBlock(1773273600, 17937210, 0x1e00227b, 1, 100 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"00000051a1a941989c60b71a70412ec239f4c968d2c8ad5a34a5eb4e7bc68775"});
+        assert(consensus.hashGenesisBlock == uint256{"0000001cfd5f2ca55e9815affb599b45501e492fa232fd3917d6490981f9e00d"});
         assert(genesis.hashMerkleRoot == uint256{"1c36738b95ca56a0cdfde1b809ded354bf8d68a09a118d2fd0e3d0fcf0d6399d"});
 
         vSeeds.clear(); // No DNS seeds for Gregcoin

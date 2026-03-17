@@ -66,15 +66,23 @@ maxconnections=50
 
 ### Connecting to the network
 
-A public seed node is being set up at `coin.gregcathcart.com:8444`. Once available, add it as a peer:
+The seed node is reachable via Tor at:
 
-```sh
-./build/bin/gregcoin-cli -datadir=~/.gregcoin addnode "coin.gregcathcart.com:8444" "add"
+```
+mhkm2jaynobkxrragdq7ntz3gypbbn7lcsybwoergjyjp57ohv6cv7id.onion:8444
 ```
 
-Check your connections:
+You must have Tor running locally (SOCKS proxy on `127.0.0.1:9050`). Add the following to your `gregcoin.conf`:
+
+```
+onion=127.0.0.1:9050
+addnode=mhkm2jaynobkxrragdq7ntz3gypbbn7lcsybwoergjyjp57ohv6cv7id.onion:8444
+```
+
+Then start the daemon and check your connections:
 
 ```sh
+./build/bin/gregcoind -daemon -datadir=~/.gregcoin
 ./build/bin/gregcoin-cli -datadir=~/.gregcoin getpeerinfo
 ```
 
