@@ -1,6 +1,6 @@
 # Gregcoin (GRC)
 
-A peer-to-peer electronic cash system forked from Bitcoin Core.
+A peer-to-peer electronic cash system forked from Bitcoin Core, with modified chain parameters for experimental use.
 
 ## Parameters
 
@@ -9,7 +9,7 @@ A peer-to-peer electronic cash system forked from Bitcoin Core.
 | Ticker | GRC |
 | Total supply | 42,000,000 GRC |
 | Block reward | 100 GRC (halving every 210,000 blocks) |
-| Block time | 2.5 minutes (150 seconds) |
+| Block time | 2.5 minutes |
 | Address prefix | G (version byte 38) |
 | Mainnet port | 8444 |
 | RPC port | 8445 |
@@ -21,9 +21,14 @@ A peer-to-peer electronic cash system forked from Bitcoin Core.
 ### Dependencies (Debian/Ubuntu)
 
 ```sh
-sudo apt install build-essential cmake libboost-all-dev libssl-dev libevent-dev \
-  libdb-dev libdb++-dev libminiupnpc-dev libzmq3-dev pkg-config
+sudo apt install build-essential cmake libboost-all-dev libssl-dev \
+  libevent-dev libdb-dev libdb++-dev libminiupnpc-dev libzmq3-dev pkg-config
 ```
+
+> **Debian 13 (trixie) note:** `libevent-dev` alone is not enough at runtime. Also install:
+> ```sh
+> sudo apt install libevent-core-2.1-7t64 libevent-extra-2.1-7t64 libevent-pthreads-2.1-7t64
+> ```
 
 ### Compile
 
@@ -32,83 +37,88 @@ cmake -B build
 cmake --build build -j$(nproc)
 ```
 
-Binaries will be in `build/src/`:
-- `bitcoind` — full node daemon
-- `bitcoin-cli` — RPC client
-- `bitcoin-qt` — GUI wallet (if Qt is available)
+Binaries will be in `build/bin/`:
+- `gregcoind` — full node daemon
+- `gregcoin-cli` — RPC client
 
-## Running
+## Running a Full Node
 
-### Mainnet
+### Configuration
 
-```sh
-./build/src/bitcoind -daemon
-./build/src/bitcoin-cli getblockchaininfo
-```
-
-Configuration file: `~/.bitcoin/bitcoin.conf`
+Create `~/.gregcoin/gregcoin.conf`:
 
 ```ini
 server=1
+listen=1
 rpcuser=grcuser
 rpcpassword=yourpassword
 rpcport=8445
 port=8444
+maxconnections=50
 ```
 
-### Regtest (development)
+### Start the daemon
 
 ```sh
-./build/src/bitcoind -regtest -daemon
-./build/src/bitcoin-cli -regtest createwallet mywallet
-./build/src/bitcoin-cli -regtest getnewaddress
-./build/src/bitcoin-cli -regtest generatetoaddress 10 <address>
-# Each block earns 100 GRC; 10 blocks = 1000 GRC (minus maturity delay)
+./build/bin/gregcoind -daemon -datadir=~/.gregcoin
+./build/bin/gregcoin-cli -datadir=~/.gregcoin getblockchaininfo
+```
+
+### Connecting to the network
+
+A public seed node is being set up at `coin.gregcathcart.com:8444`. Once available, add it as a peer:
+
+```sh
+./build/bin/gregcoin-cli -datadir=~/.gregcoin addnode "coin.gregcathcart.com:8444" "add"
+```
+
+Check your connections:
+
+```sh
+./build/bin/gregcoin-cli -datadir=~/.gregcoin getpeerinfo
 ```
 
 ## Mining
 
-See [`tools/grc-miner-gui/`](tools/grc-miner-gui/) for GUI miners available for:
-- macOS
-- Windows
-- Linux
+Gregcoin uses SHA-256 proof of work and is intentionally CPU-minable (low difficulty, no ASICs).
 
-Three implementations are provided: Python/tkinter, Electron, and Go+Fyne.
+GUI miners for macOS, Windows, and Linux are in [`tools/grc-miner-gui/`](tools/grc-miner-gui/):
 
-### Genesis block
+| Version | Directory | How to run |
+|---------|-----------|------------|
+| Python/tkinter | `tkinter/` | `python3 grc_miner.py` |
+| Electron | `electron/` | `npm install && npm start` |
+| Go+Fyne | `go-fyne/` | `go run .` |
 
-The genesis block must be mined once before the mainnet can be launched.
+All GUI miners connect to a local or remote `gregcoind` node via JSON-RPC and use `getblocktemplate`.
 
-```sh
-cd tools/genesis_miner
-python3 mine_genesis.py
-```
+To mine against a running node:
+1. Start `gregcoind` and wait for it to sync
+2. Create a wallet and get an address: `gregcoin-cli -datadir=~/.gregcoin getnewaddress`
+3. Open a GUI miner and point it at `127.0.0.1:8445` with your RPC credentials
 
-To parallelise across the Pi cluster:
-
-```sh
-bash mine_genesis_parallel.sh
-```
-
-## Network
-
-No DNS seeds or fixed seeds are configured. Nodes must be added manually:
+## Development / Regtest
 
 ```sh
-./build/src/bitcoin-cli addnode "10.0.1.220:8444" "add"
-./build/src/bitcoin-cli addnode "10.0.1.222:8444" "add"
-./build/src/bitcoin-cli addnode "10.0.1.219:8444" "add"
-./build/src/bitcoin-cli addnode "10.0.1.224:8444" "add"
+./build/bin/gregcoind -regtest -daemon -datadir=~/.gregcoin-regtest
+./build/bin/gregcoin-cli -regtest -datadir=~/.gregcoin-regtest createwallet mywallet
+./build/bin/gregcoin-cli -regtest -datadir=~/.gregcoin-regtest getnewaddress
+./build/bin/gregcoin-cli -regtest -datadir=~/.gregcoin-regtest generatetoaddress 10 <address>
+# 10 blocks × 100 GRC = 1000 GRC (subject to coinbase maturity)
 ```
 
-## Pi Cluster Nodes
+## Key Modified Files
 
-| Hostname | IP | Role |
-|----------|----|------|
-| picard | 10.0.1.220 | seed node |
-| data | 10.0.1.222 | miner |
-| troi | 10.0.1.219 | miner |
-| worf | 10.0.1.224 | miner |
+For those curious about the fork changes:
+
+| File | Change |
+|------|--------|
+| `CMakeLists.txt` | Binary/project name |
+| `src/chainparamsbase.cpp` | Port defaults (8444/8445) |
+| `src/chainparamsseeds.h` | DNS/fixed seeds removed |
+| `src/consensus/amount.h` | Supply and coin constants |
+| `src/kernel/chainparams.cpp` | Chain params, ports, magic bytes, genesis block |
+| `src/validation.cpp` | Block time tweaks |
 
 ## License
 
