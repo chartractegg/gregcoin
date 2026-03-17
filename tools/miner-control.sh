@@ -3,12 +3,8 @@
 # Usage: ./miner-control.sh [deploy|start|stop|restart|status] [--cpu 25|50|75|100]
 
 COINBASE_ADDR="grc1qthh3zwq09k22yqegv7265xgfvzx447y3rwf3a0"
-GREGCOIN_CONF="${HOME}/.gregcoin/gregcoin.conf"
-RPC_USER=$(grep -m1 '^rpcuser=' "$GREGCOIN_CONF" | cut -d= -f2)
-RPC_PASS=$(grep -m1 '^rpcpassword=' "$GREGCOIN_CONF" | cut -d= -f2)
-RPC_HOST="10.0.1.220"
-RPC_PORT=$(grep -m1 '^rpcport=' "$GREGCOIN_CONF" | cut -d= -f2)
-RPC_PORT="${RPC_PORT:-8445}"
+POOL_HOST="10.0.1.220"
+POOL_PORT="3333"
 GREGMINER_BIN="/home/pi/gregminer/gregminer"
 
 # CPU throttle: percentage of cores to use (25/50/75/100)
@@ -21,14 +17,14 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5"
 # Format: "ip:name:rpc_host"
 # picard uses 127.0.0.1 for RPC (local), workers use picard's IP
 NODES=(
-  "10.0.1.220:picard:127.0.0.1"
-  "10.0.1.221:riker:${RPC_HOST}"
-  "10.0.1.222:data:${RPC_HOST}"
-  "10.0.1.223:laforge:${RPC_HOST}"
-  "10.0.1.224:worf:${RPC_HOST}"
-  "10.0.1.218:lore:${RPC_HOST}"
-  "10.0.1.219:troi:${RPC_HOST}"
-  "10.0.1.217:wesley:${RPC_HOST}"
+  "10.0.1.220:picard"
+  "10.0.1.221:riker"
+  "10.0.1.222:data"
+  "10.0.1.223:laforge"
+  "10.0.1.224:worf"
+  "10.0.1.218:lore"
+  "10.0.1.219:troi"
+  "10.0.1.217:wesley"
 )
 
 ssh_run() {
@@ -52,7 +48,7 @@ scp_to() {
 do_deploy() {
   echo "Deploying gregminer binary to all nodes..."
   for entry in "${NODES[@]}"; do
-    local ip="${entry%%:*}"; local rest="${entry#*:}"; local name="${rest%%:*}"
+    local ip="${entry%%:*}"; local name="${entry##*:}"
     echo -n "  [$name] copying binary... "
     ssh_run "$ip" "mkdir -p /home/pi/gregminer"
     scp_to "$ip" "$GREGMINER_BIN" "/home/pi/gregminer/gregminer"
@@ -71,13 +67,12 @@ do_start() {
   local pct="${CPU_PCT}"
   echo "  CPU throttle: ${pct}% of cores"
   for entry in "${NODES[@]}"; do
-    local ip="${entry%%:*}"; local rest="${entry#*:}"
-    local name="${rest%%:*}"; local rpc_host="${rest##*:}"
+    local ip="${entry%%:*}"; local name="${entry##*:}"
     local threads_cmd
     threads_cmd=$(threads_for_pct "$pct")
     local cmd="/home/pi/gregminer/gregminer -a sha256d \
-      -o http://${RPC_USER}:${RPC_PASS}@${rpc_host}:${RPC_PORT} \
-      --coinbase-addr=${COINBASE_ADDR} \
+      -o stratum+tcp://${POOL_HOST}:${POOL_PORT} \
+      -u ${COINBASE_ADDR} -p x \
       --api-bind=0.0.0.0:4048 --api-remote \
       --scantime=30 \
       -t \$($threads_cmd) -q"
@@ -88,7 +83,7 @@ do_start() {
 
 do_stop() {
   for entry in "${NODES[@]}"; do
-    local ip="${entry%%:*}"; local rest="${entry#*:}"; local name="${rest%%:*}"
+    local ip="${entry%%:*}"; local name="${entry##*:}"
     echo -n "  [$name] stopping... "
     ssh_run "$ip" "pkill -f 'gregminer/gregminer' && echo stopped || echo 'not running'"
   done
@@ -120,7 +115,7 @@ parse_args() {
 do_status() {
   echo "Miner status:"
   for entry in "${NODES[@]}"; do
-    local ip="${entry%%:*}"; local rest="${entry#*:}"; local name="${rest%%:*}"
+    local ip="${entry%%:*}"; local name="${entry##*:}"
     printf "  %-10s (%s): " "$name" "$ip"
     local result
     result=$(ssh_run "$ip" "pgrep -c -f 'gregminer/gregminer' 2>/dev/null")
