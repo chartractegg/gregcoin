@@ -9,6 +9,7 @@ import base64
 import collections
 import curses
 import json
+import os
 import socket
 import subprocess
 import time
@@ -33,7 +34,6 @@ def _load_rpc_config():
         pass
     return conf
 
-import os as _os
 _rpc_conf = _load_rpc_config()
 
 RPC_URL        = f"http://127.0.0.1:{_rpc_conf.get('rpcport', '8445')}"
