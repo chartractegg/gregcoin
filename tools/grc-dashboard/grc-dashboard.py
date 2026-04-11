@@ -141,6 +141,7 @@ def fetch_chain() -> ChainInfo:
         ci.difficulty = info.get("difficulty", 0.0)
         mining = rpc("getmininginfo") or {}
         ci.net_khs = mining.get("networkhashps", 0) / 1000.0
+        rpc("loadwallet", ["main"])  # no-op if already loaded
         ci.balance = rpc("getbalance") or 0.0
         recent = []
         start = max(1, ci.blocks - MAX_BLOCKS + 1)

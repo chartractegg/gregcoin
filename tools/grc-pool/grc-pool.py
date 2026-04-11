@@ -22,7 +22,7 @@ import sys
 from typing import Optional
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -120,6 +120,14 @@ def p2wpkh_script(witness_program: bytes) -> bytes:
 def sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
+def swab32(b: bytes) -> bytes:
+    """Byte-swap each 32-bit word in a byte string (cpuminer endian compensation)."""
+    assert len(b) % 4 == 0, f"swab32: length {len(b)} not divisible by 4"
+    result = bytearray()
+    for i in range(0, len(b), 4):
+        result += b[i:i+4][::-1]
+    return bytes(result)
+
 # ── RPC client ────────────────────────────────────────────────────────────────
 
 class RPCError(Exception):
@@ -211,9 +219,8 @@ def build_coinbase(height: int, value_sat: int, script_pubkey: bytes,
         vin_count +
         prevout +
         scriptsig_len +
-        script_prefix +
-        extranonce1
-        # extranonce2 goes here (miner fills)
+        script_prefix
+        # miner inserts extranonce1 + extranonce2 here (standard stratum)
     )
     coinbase2 = (
         vin_sequence +
@@ -266,6 +273,7 @@ class JobManager:
         self._new_block_event = asyncio.Event()
         self._sessions: list["StratumSession"] = []
         self._lock = asyncio.Lock()
+        self._cached_gbt: Optional[dict] = None  # latest GBT from poll_loop
 
     def register_session(self, session):
         self._sessions.append(session)
@@ -330,6 +338,7 @@ class JobManager:
             try:
                 gbt = await self.fetch_gbt(self._longpoll_id)
                 self._longpoll_id = gbt.get("longpollid")
+                self._cached_gbt = gbt
                 log.info(f"New block template: height={gbt['height']} txs={len(gbt.get('transactions',[]))}")
                 self._new_block_event.set()
                 self._new_block_event.clear()
@@ -347,8 +356,13 @@ class JobManager:
                 await asyncio.sleep(5)
 
     async def get_current_gbt(self) -> dict:
-        """Fetch a fresh GBT (for initial job dispatch to new miner)."""
-        return await self.fetch_gbt()
+        """Return cached GBT if available, else fetch fresh. Only poll_loop fetches live."""
+        if self._cached_gbt is not None:
+            return self._cached_gbt
+        # First miner connected before poll_loop returned — fetch once
+        gbt = await self.fetch_gbt()
+        self._cached_gbt = gbt
+        return gbt
 
 # ── Stratum session ───────────────────────────────────────────────────────────
 
@@ -394,14 +408,20 @@ class StratumSession:
         # Encode coinbase parts as hex
         cb1 = job.coinbase1.hex()
         cb2 = job.coinbase2.hex()
-        # Prevhash in little-endian per stratum spec
-        prevhash_le = bytes.fromhex(job.gbt["previousblockhash"])[::-1].hex()
-        # Version as little-endian hex
-        version_hex = struct.pack("<I", job.version).hex()
-        # ntime as hex
+        # cpuminer uses SHA256 with swap=0 (each 32-bit word byte-reversed on LE machines).
+        # To ensure the miner's effective SHA256 operates on the correct Bitcoin block header
+        # bytes, we pre-compensate each field:
+        #   version: send BE so miner's le32dec + swap=0 gives correct LE bytes
+        #   version: send BE so miner's le32dec + swap=0 gives correct LE bytes
+        #   prevhash: send swab32(internal) so miner's hex2bin + swap=0 gives internal bytes
+        #   ntime: send BE (unchanged) — miner's le32dec + swap=0 already gives correct LE
+        #   nbits: send AS-IS from GBT so miner's le32dec + swap=0 gives correct LE bytes
+        #     (le32dec("1d06b2b6") = 0xb6b2061d; swap=0 SHA256 sees bytes b6 b2 06 1d = LE of 0x1d06b2b6)
+        internal_prevhash = bytes.fromhex(job.gbt["previousblockhash"])[::-1]
+        prevhash_le = swab32(internal_prevhash).hex()
+        version_hex = struct.pack(">I", job.version).hex()
         ntime_hex = struct.pack(">I", job.ntime).hex()
-        # nbits as-is (already in correct endianness for stratum)
-        nbits_hex = job.nbits
+        nbits_hex = job.nbits  # send as-is: le32dec + swap=0 yields correct LE nbits bytes
 
         await self.send({
             "id": None,
@@ -419,6 +439,7 @@ class StratumSession:
             ],
         })
         self._current_job = job
+        log.debug(f"[{self.peer}] NOTIFY job={job.job_id} cb1={cb1[-16:]} en1={self.extranonce1.hex()} cb2={cb2[:16]}")
 
     async def send_new_work(self, clean: bool = True):
         """Fetch fresh GBT and send a new job to this miner."""
@@ -485,14 +506,15 @@ class StratumSession:
         try:
             extranonce2 = bytes.fromhex(extranonce2_hex)
             ntime = int(ntime_hex, 16)
-            nonce = bytes.fromhex(nonce_hex)
+            bytes.fromhex(nonce_hex)  # validate hex
         except ValueError:
             await self.respond(req_id, False, [20, "Hex decode error"])
             return
 
-        # Reconstruct coinbase
-        coinbase_raw = job.coinbase1 + extranonce2 + job.coinbase2
+        # Reconstruct coinbase (miner inserts en1 then en2 after coinbase1)
+        coinbase_raw = job.coinbase1 + self.extranonce1 + extranonce2 + job.coinbase2
         coinbase_hash = sha256d(coinbase_raw)
+        log.debug(f"[{self.peer}] FULLCB={coinbase_raw.hex()} hash={coinbase_hash.hex()[:16]}")
 
         # Compute merkle root
         merkle_root = coinbase_hash
@@ -500,25 +522,32 @@ class StratumSession:
             branch_hash = bytes.fromhex(branch_hash_hex)[::-1]
             merkle_root = sha256d(merkle_root + branch_hash)
 
-        # Build 80-byte block header
+        # Build 80-byte block header using the correct Bitcoin wire format.
+        # After notify pre-compensation, the miner's effective SHA256 operates on this
+        # exact header. ntime is LE (standard Bitcoin), nonce is reversed because
+        # cpuminer submits swab32(K) but SHA256 uses BE(K) = swab32(LE(K)).
         version_bytes = struct.pack("<I", job.version)
         prevhash_bytes = bytes.fromhex(job.gbt["previousblockhash"])[::-1]
-        ntime_bytes = struct.pack(">I", ntime)
-        nbits_bytes = bytes.fromhex(job.nbits)
+        ntime_bytes = struct.pack("<I", ntime)
+        nbits_bytes = bytes.fromhex(job.nbits)[::-1]   # LE uint32 for block header
+        nonce_bytes = bytes.fromhex(nonce_hex)[::-1]
         header = (
             version_bytes +
             prevhash_bytes +
             merkle_root +
             ntime_bytes +
             nbits_bytes +
-            nonce
+            nonce_bytes
         )
+        log.debug(f"[{self.peer}] FULLHDR={header.hex()}")
         header_hash = sha256d(header)
         hash_int = int.from_bytes(header_hash[::-1], "big")
 
         # Check share difficulty
         share_target = diff_to_target(self.cfg["share_difficulty"])
         if hash_int > share_target:
+            share_diff = (diff_to_target(1.0) / hash_int) if hash_int else 0
+            log.warning(f"[{self.peer}] Low difficulty share: hash_diff={share_diff:.6f} target_diff={self.cfg['share_difficulty']} hash={header_hash[::-1].hex()[:16]}...")
             await self.respond(req_id, False, [23, "Low difficulty share"])
             return
 
@@ -610,6 +639,7 @@ class StratumSession:
                 elif method == "mining.authorize":
                     await self.handle_authorize(req_id, params)
                 elif method == "mining.submit":
+                    log.debug(f"[{self.peer}] SUBMIT params={params}")
                     await self.handle_submit(req_id, params)
                 elif method == "mining.extranonce.subscribe":
                     await self.respond(req_id, True)
